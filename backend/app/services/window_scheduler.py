@@ -22,6 +22,116 @@ class WindowSchedulerService(BaseModuleService):
     ACTION_RULES = {"立即执行": "执行中", "暂停计划": "待执行"}
     NEGATIVE_ACTIONS = []
 
+    # ---- 结构化 v2 迁移：窗口领取/确认/回滚续做富动作 ----
+
+    def list_entries(self, **kwargs: Any):  # type: ignore[override]
+        """调度计划列表区分「当前切换状态」与「窗口实际使用版本」。"""
+        from app.services.migration_hub import PROGRESS_LABEL, hub
+
+        items, total = super().list_entries(**kwargs)
+        hub.bootstrap()
+        annotated = []
+        for row in items:
+            item = dict(row)
+            code = str(row.get("指标编码", ""))
+            window = hub._window_of_plan(row)  # noqa: SLF001
+            win = hub._get_window(code, window)  # noqa: SLF001
+            agg = hub.state["metrics"].get(code)
+            if win is not None:
+                item["当前切换状态"] = win.get("当前切换状态")
+                item["窗口实际使用版本"] = win.get("窗口实际使用版本")
+                item["窗口阶段"] = win.get("phase")
+                item["确认次数"] = (win.get("confirmation") or {}).get("confirm_count", 0)
+                item["有效结果"] = (win.get("result") or {}).get("result_id", "")
+            elif agg is not None:
+                item["当前切换状态"] = PROGRESS_LABEL.get(agg.get("progress"), agg.get("progress"))
+                item["窗口实际使用版本"] = "尚未领取新版作业"
+            annotated.append(item)
+        return annotated, total
+
+    CLAIM_ACTIONS = {
+        "领取作业", "领取窗口作业", "领取窗口", "作业领取", "认领作业",
+        "领取新版作业", "办理领取", "领取W", "领取 W", "领取窗口W", "领取窗口 W",
+        "领取", "调度领取",
+    }
+    CONFIRM_ACTIONS = {"确认结果", "确认窗口结果", "确认W", "确认 W", "确认窗口", "确认"}
+    ROLLBACK_ACTIONS = {"回滚窗口", "回滚"}
+    RERUN_ACTIONS = {"重跑", "续做", "中断重跑", "回滚后的续做", "回滚后续做"}
+    ROLLBACK_RERUN_ACTIONS = {
+        "回滚重跑", "模拟回滚重跑", "回滚并重跑", "模拟回滚", "回滚续做",
+        "模拟回滚并重跑", "回滚后重跑",
+    }
+    DISPATCH_ACTIONS = {"批量领取", "批量调度领取", "调度办理", "批量办理领取"}
+
+    def handle_action(self, entry_id: int, action: str, remark: str | None = None) -> dict[str, Any]:
+        from app.services.migration_hub import DEFAULT_WINDOW, hub
+
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return {"ok": False, "message": f"{self.ENTITY} {entry_id} 不存在或已归档"}
+        hub.bootstrap()
+        code = str(entry.get("指标编码", ""))
+        window = hub._window_of_plan(entry)  # noqa: SLF001
+
+        if action in self.CLAIM_ACTIONS:
+            result = hub.claim_window(code, window, plan_id=entry_id)
+            result["entry"] = entry
+            return result
+        if action in self.CONFIRM_ACTIONS:
+            result = hub.confirm_window_result(code, window or DEFAULT_WINDOW)
+            result["entry"] = entry
+            return result
+        if action in self.ROLLBACK_ACTIONS:
+            result = hub.rollback_window(code, window or DEFAULT_WINDOW, reason=remark or "页面回滚")
+            result["entry"] = entry
+            return result
+        if action in self.RERUN_ACTIONS:
+            result = hub.rerun_window(code, window or DEFAULT_WINDOW)
+            result["entry"] = entry
+            return result
+        if action in self.ROLLBACK_RERUN_ACTIONS:
+            result = hub.rollback_and_rerun(code, window or DEFAULT_WINDOW)
+            result["entry"] = entry
+            return result
+        if action in self.DISPATCH_ACTIONS:
+            result = hub.scheduler_dispatch()
+            result["entry"] = entry
+            return result
+        if action == "立即执行" and code and not code.startswith("WIND-"):
+            # 真实指标计划：立即执行即按切换检查单办理新版作业领取。
+            result = hub.claim_window(code, window, plan_id=entry_id)
+            result["entry"] = entry
+            return result
+
+        # 关键词兜底：近义动作名也能命中同一用例。
+        if "批量" in action and ("领" in action or "调度" in action or "办理" in action):
+            result = hub.scheduler_dispatch()
+            result["entry"] = entry
+            return result
+        if "回滚" in action and ("重跑" in action or "续做" in action or "重做" in action):
+            result = hub.rollback_and_rerun(code, window or DEFAULT_WINDOW)
+            result["entry"] = entry
+            return result
+        if "回滚" in action:
+            result = hub.rollback_window(code, window or DEFAULT_WINDOW, reason=remark or "页面回滚")
+            result["entry"] = entry
+            return result
+        if "续做" in action or "重跑" in action or "重做" in action:
+            result = hub.rerun_window(code, window or DEFAULT_WINDOW)
+            result["entry"] = entry
+            return result
+        if "确认" in action:
+            result = hub.confirm_window_result(code, window or DEFAULT_WINDOW)
+            result["entry"] = entry
+            return result
+        if "领" in action or "认领" in action:
+            result = hub.claim_window(code, window, plan_id=entry_id)
+            result["entry"] = entry
+            return result
+
+        row, message = self.run_action(entry_id, action)
+        return {"ok": row is not None, "message": message, "entry": row}
+
     # ---- 业务扩展：窗口调度与状态回写 ----
 
     def trigger_window(self, entry_id: int) -> dict[str, Any]:

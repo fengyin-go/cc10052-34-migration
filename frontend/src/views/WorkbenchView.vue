@@ -22,6 +22,15 @@
       </article>
     </div>
 
+    <div v-if="actionFeedback" class="fx-msg" :class="actionFeedback.ok ? 'ok' : 'err'" data-testid="action-feedback">
+      <span data-testid="action-message">{{ actionFeedback.message }}</span>
+      <pre v-if="actionFeedback.detail" class="fx-formula" style="margin-top:8px" data-testid="action-detail-json">{{ actionFeedback.detail }}</pre>
+    </div>
+
+    <CatalogMigrationPanel v-if="moduleKey === 'metric_catalog'" :refresh-tick="panelTick" @changed="reload" />
+    <SchedulerMigrationPanel v-else-if="moduleKey === 'window_scheduler'" :refresh-tick="panelTick" @changed="reload" />
+    <ComputeDefinitionPanel v-else-if="moduleKey === 'metric_compute'" :refresh-tick="panelTick" />
+
     <p class="status-legend">
       <span v-for="item in statusSummary" :key="item.status" class="legend-item">
         {{ item.status }}：{{ item.count }}
@@ -103,6 +112,9 @@ import {
   moduleMeta,
   runAction as applyAction,
 } from '@/api/backend-service'
+import CatalogMigrationPanel from '@/components/CatalogMigrationPanel.vue'
+import ComputeDefinitionPanel from '@/components/ComputeDefinitionPanel.vue'
+import SchedulerMigrationPanel from '@/components/SchedulerMigrationPanel.vue'
 import type { EntryRow } from '@/data/types'
 
 const props = defineProps<{ moduleKey: string }>()
@@ -110,6 +122,8 @@ const meta = moduleMeta(props.moduleKey)
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const panelTick = ref(0)
+const actionFeedback = ref<{ ok: boolean; message: string; detail: string } | null>(null)
 const filters = ref<Record<string, string>>({})
 const filterFields = meta.fields.slice(0, 3)
 const showCreate = ref(false)
@@ -167,12 +181,41 @@ async function submitCreate() {
 
 async function runAction(action: string, row: EntryRow) {
   errorMessage.value = ''
+  actionFeedback.value = null
   try {
     const result = await applyAction(meta.key, Number(row.id), action)
-    if (!result.ok) throw new Error(result.message)
+    if (!result.ok) {
+      actionFeedback.value = { ok: false, message: result.message, detail: detailJson(result) }
+      throw new Error(result.message)
+    }
+    actionFeedback.value = { ok: true, message: result.message || `已执行 ${action}`, detail: detailJson(result) }
+    panelTick.value += 1
     await reload()
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '操作失败'
+    const message = error instanceof Error ? error.message : '操作失败'
+    errorMessage.value = message
+    if (!actionFeedback.value) {
+      actionFeedback.value = { ok: false, message, detail: '' }
+    }
+  }
+}
+
+function detailJson(result: any): string {
+  try {
+    const { entry, ...rest } = result || {}
+    void entry
+    // 只保留能说明口径/证据/冲突的关键字段，避免整行噪声。
+    const picked: Record<string, unknown> = {}
+    for (const key of [
+      'code', 'conflict', 'metric_code', 'window', 'job_id', 'pack_id', 'mapping_id',
+      'batch_id', 'format', 'progress', '切换进度', 'dispatched', 'duplicate', 'resumed',
+      'blockers', 'structured_formula', 'event_dependencies', 'window_state', 'check',
+    ]) {
+      if (rest[key] !== undefined) picked[key] = rest[key]
+    }
+    return Object.keys(picked).length ? JSON.stringify(picked, null, 2) : ''
+  } catch {
+    return ''
   }
 }
 

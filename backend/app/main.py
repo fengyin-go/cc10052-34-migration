@@ -10,8 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.routers import ROUTERS
+from app.routers import compat as compat_router
+from app.routers import migration as migration_router
 from app.store import store
-
 app = FastAPI(title="实验指标分析与归因评估平台", version="1.0.0")
 
 app.add_middleware(
@@ -21,6 +22,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 结构化公式 v2 迁移工作台接口：同一组能力暴露多个语义前缀。
+for prefix in ("/api/formula-v2", "/api/migration", "/api/formula-migration"):
+    app.include_router(migration_router.router, prefix=prefix)
+
+# 模块命名空间下的语义兼容路径，必须先于统一资源路由注册。
+app.include_router(compat_router.router)
 
 @app.get("/api/health")
 def health() -> dict[str, object]:

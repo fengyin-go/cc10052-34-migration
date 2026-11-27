@@ -22,6 +22,73 @@ class MetricComputeService(BaseModuleService):
     ACTION_RULES = {"启动作业": "执行中", "重试计算": "计算失败"}
     NEGATIVE_ACTIONS = []
 
+    # ---- 口径快照读回 / 领取 / 确认 富动作 ----
+
+    DEFINITION_ACTIONS = {"读回口径", "查看口径", "口径快照", "查看具体口径",
+                          "读回开始口径", "查看作业口径"}
+    CLAIM_ACTIONS = {"领取作业", "认领作业", "领取"}
+    CONFIRM_ACTIONS = {"确认结果", "确认"}
+
+    def handle_action(self, entry_id: int, action: str, remark: str | None = None) -> dict[str, Any]:
+        from app.services.migration_hub import hub
+
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return {"ok": False, "message": f"{self.ENTITY} {entry_id} 不存在或已归档"}
+        hub.bootstrap()
+        code = str(entry.get("指标编码", ""))
+        window = str(entry.get("计算窗口", ""))
+
+        if action in self.DEFINITION_ACTIONS:
+            result = hub.job_definition(entry_id)
+            result["entry"] = entry
+            return result
+        if action in self.CLAIM_ACTIONS:
+            result = hub.claim_window(code, window)
+            result["entry"] = entry
+            return result
+        if action in self.CONFIRM_ACTIONS:
+            result = hub.confirm_window_result(code, window)
+            result["entry"] = entry
+            return result
+        if action == "启动作业":
+            # v2 作业走窗口完成用例，保证结果唯一与格式不混读；
+            # 其它作业保留原有 start_job 行为。
+            snapshot = entry.get("口径快照")
+            if isinstance(snapshot, dict) and snapshot.get("format") == "structured-v2":
+                result = hub.complete_window(code, window)
+                result["entry"] = entry
+                return result
+            legacy = self.start_job(entry_id)
+            return {"ok": bool(legacy.get("ok")), "message": legacy.get("message", ""),
+                    "entry": store.find(self.MODULE, entry_id)}
+
+        # 关键词兜底：近义动作名命中同一用例。
+        if any(k in action for k in ("口径", "快照", "定义", "公式")):
+            result = hub.job_definition(entry_id)
+            result["entry"] = entry
+            return result
+        if "确认" in action:
+            result = hub.confirm_window_result(code, window)
+            result["entry"] = entry
+            return result
+        if "领" in action or "认领" in action:
+            result = hub.claim_window(code, window)
+            result["entry"] = entry
+            return result
+        if any(k in action for k in ("启动", "开始", "执行作业", "运行")):
+            snapshot = entry.get("口径快照")
+            if isinstance(snapshot, dict) and snapshot.get("format") == "structured-v2":
+                result = hub.complete_window(code, window)
+                result["entry"] = entry
+                return result
+            legacy = self.start_job(entry_id)
+            return {"ok": bool(legacy.get("ok")), "message": legacy.get("message", ""),
+                    "entry": store.find(self.MODULE, entry_id)}
+
+        row, message = self.run_action(entry_id, action)
+        return {"ok": row is not None, "message": message, "entry": row}
+
     # ---- 业务扩展：窗口计算与结果下发 ----
 
     def start_job(self, entry_id: int) -> dict[str, Any]:

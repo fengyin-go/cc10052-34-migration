@@ -71,6 +71,62 @@ npm run dev
 | 结论评审队列 | `conclusion_review` | 评审记录 | 记录编号、实验编码、评审结论 |
 | 指标查询服务 | `metric_api` | 查询接口 | 接口编码、指标编码、服务对象 |
 
+## 结构化公式 v2 迁移工作台
+
+在原 20 个模块之外，新增「公式迁移工作台」（前端路由 `/migration`，左侧导航可进入），
+并在 **指标口径中心 / 窗口调度器 / 指标计算作业** 三个原页面内嵌对应面板。
+
+### 场景数据（服务启动自动引导，可幂等重置）
+
+- 指标 `M`：旧文本公式 `COUNT(buy)/曝光量`（口径版本 v1，状态已生效），
+  窗口 `W` 的最新一笔旧版计算 `RES-M-W-V1=0.128` 已登记为「已完成」作业（text-v1 快照，可重读）。
+- 指标 `M2`：`COUNT(unknown_cart_event)/曝光量`，事件未在事件接入登记，预查结论「无法转换」。
+- 指标 `M3`：`COUNT(DISTINCT user_id)/曝光量`，去重语义不在 v2 无损子集，同样阻断并列出原值/原因。
+
+### 核心规则
+
+- 解析器向服务端**真实事件表**（`event_stream`）与**分母注册表**核对：
+  `COUNT(buy)/曝光量` →
+  `{schema:'metric-formula/v2', numerator:{aggregation:'count', event:'buy'}, denominator:{code:'exposure_count',...}}`，
+  完整保留事件与分母含义。
+- 无法无损转换时返回 `blockers[].code/reason/原值`（如 `UNKNOWN_EVENT`、`UNKNOWN_DENOMINATOR`、
+  `UNRECOGNIZED_EXPRESSION`、`UNSUPPORTED_AGGREGATION`、`LOSSY_DISTINCT`、`EVENT_NOT_VERIFIED`）。
+- 迁移进度：`UNCHECKED → UNCONFIRMED（检查单已生成）→ ONLINE（确认切换/上线）/ BLOCKED`。
+  进度未确认时调度领取返回 `ok:false, conflict:true, code:'MIGRATION_UNCONFIRMED'`；
+  无法转换返回 `code:'FORMULA_NOT_CONVERTIBLE'` 且不派新版作业。
+- 确认切换生成新旧映射 `MAP-*` 与同一套口径证据包 `EVP-*`（含 content_hash）。
+- 窗口领取幂等：同一 `(指标, 窗口)` 只有一条切换记录、一个 v2 作业身份与一个有效结果；
+  回滚后可续做（复用同一作业/证据/结果），重复确认的 `confirm_count` 恒为 1。
+- 作业只绑定一种格式（`text-v1` / `structured-v2`）。用另一种格式读口径返回
+  `code:'FORMAT_MISMATCH'`，杜绝同一作业混读两种格式。
+- 调度只能领取带当前证据包的可执行 v2 作业；批量办理会跳过未确认/无法转换的指标。
+- 已完成/已认领作业可读回开始时固化的口径快照、真实公式与事件依赖；
+  旧公式↔旧作业↔历史查询接口的引用在页面与 `/references/{code}` 可查证，原历史查询
+  `/history/query?metric_code=M&window=W` 仍按 text-v1 返回。
+
+### 常用接口
+
+```text
+GET  /api/formula-v2/workbench                 # 工作台聚合：兼容结果/进度/映射/窗口/批次
+POST /api/formula-v2/precheck                  # 全量或按 metric_code 预查
+GET  /api/formula-v2/checklist/{metric_code}   # 服务端切换检查单
+POST /api/formula-v2/metrics/{code}/confirm    # 确认切换/上线（幂等）
+POST /api/formula-v2/windows/claim             # {metric_code, window} 领取 W
+POST /api/formula-v2/windows/complete          # 完成并登记唯一有效结果
+POST /api/formula-v2/windows/confirm           # 结果确认（同一窗口仅一次）
+POST /api/formula-v2/windows/rollback-rerun    # 模拟回滚重跑/续做
+POST /api/formula-v2/scheduler/dispatch        # 调度批量领取（阻断项跳过不派单）
+GET  /api/formula-v2/jobs/{id}/definition[?format=text-v1|structured-v2]
+GET  /api/formula-v2/references/{metric_code}  # 旧公式/旧作业/历史查询引用
+GET  /api/formula-v2/history/query?...         # 原历史查询（旧口径仍有效）
+GET  /api/formula-v2/batches/{batch_id}        # 上线批次的真实公式与事件依赖
+POST /api/formula-v2/testing/reset             # 重置演示场景
+```
+
+同一组接口也挂在 `/api/migration/*`、`/api/formula-migration/*` 前缀；
+通用动作接口 `POST /api/{metric_catalog|window_scheduler|metric_compute}/{id}/actions`
+支持「预查公式 / 确认切换并上线 / 领取窗口作业 / 确认窗口结果 / 回滚重跑 / 读回口径」等中文动作及常见近义说法。
+
 ## 约定
 
 - 全部模块共享`frontend/src/views/WorkbenchView.vue|tsx`和一套资源路由。

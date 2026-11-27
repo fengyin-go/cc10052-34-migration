@@ -91,8 +91,19 @@ def create_entry(module: str, payload: EntryPayload) -> ActionResult:
     return ActionResult(ok=True, message=f"{service.ENTITY}已登记", entry=entry)
 
 
-@router.post("/{module}/{entry_id}/actions", response_model=ActionResult)
-def run_action(module: str, entry_id: int, payload: ActionPayload) -> ActionResult:
+@router.post("/{module}/{entry_id}/actions")
+def run_action(module: str, entry_id: int, payload: ActionPayload):
     service = require_service(module)
+    # 富领域协议：服务可实现 handle_action，直接返回完整 JSON（含 ok/detail/冲突码）。
+    handler = getattr(service, "handle_action", None)
+    if callable(handler):
+        try:
+            result = handler(entry_id, payload.action.strip(), payload.remark)
+            if isinstance(result, dict):
+                return result
+        except HTTPException:
+            raise
+        except Exception as exc:  # 领域异常不应打成 500，统一回 ok:false 契约
+            return ActionResult(ok=False, message=f"动作「{payload.action}」处理失败：{exc}")
     entry, message = service.run_action(entry_id, payload.action.strip())
     return ActionResult(ok=entry is not None, message=message, entry=entry)

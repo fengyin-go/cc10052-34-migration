@@ -6,6 +6,19 @@
         <p class="page-desc">汇总各业务模块的关键指标，先看总量再看异常。</p>
       </div>
     </header>
+
+    <RouterLink to="/migration" class="fx-panel" data-testid="overview-migration-entry"
+      style="display:flex;align-items:center;justify-content:space-between;text-decoration:none;color:inherit;border-color:#b6ccf7;background:#f5f9ff">
+      <div>
+        <h3 style="margin:0 0 4px">公式结构化 v2 迁移工作台</h3>
+        <p class="fx-sub" style="margin:0">
+          预查指标口径中心每条文本公式的兼容性与阻断原因，核对新旧映射、切换检查单与进度，
+          办理窗口 W 的新版作业领取、确认（仅一次）与回滚续做。
+        </p>
+      </div>
+      <span class="btn primary" style="flex-shrink:0;margin-left:16px">进入工作台 →</span>
+    </RouterLink>
+
     <div class="stat-row">
       <article v-for="card in cards" :key="card.label" class="stat-card">
         <span class="stat-label">{{ card.label }}</span>

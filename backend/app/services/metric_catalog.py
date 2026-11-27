@@ -22,6 +22,104 @@ class MetricCatalogService(BaseModuleService):
     ACTION_RULES = {"生效口径": "已生效", "废弃口径": "已废弃"}
     NEGATIVE_ACTIONS = []
 
+    # ---- 结构化公式 v2 迁移动作（富协议，供统一动作路由调用） ----
+
+    def list_entries(self, **kwargs: Any):  # type: ignore[override]
+        """列表上直接带兼容结果与切换进度，方便资源接口与页面表格查证。"""
+        from app.services.migration_hub import PROGRESS_LABEL, hub
+
+        items, total = super().list_entries(**kwargs)
+        hub.bootstrap()
+        annotated = []
+        for row in items:
+            item = dict(row)
+            code = str(row.get("指标编码", ""))
+            agg = hub.state["metrics"].get(code)
+            if agg is None or agg.get("last_check") is None:
+                result = hub.precheck(metric_code=code, catalog_id=int(row.get("id", 0)))
+                check = result.get("check") or {}
+                agg = hub.state["metrics"].get(code, {})
+            else:
+                check = agg.get("last_check") or {}
+            item["可切换"] = bool(check.get("可转换"))
+            item["兼容结果"] = "可切换" if check.get("可转换") else "无法转换"
+            item["阻断原因"] = [b.get("reason") for b in check.get("blockers", [])]
+            item["结构化公式v2"] = check.get("structured_formula")
+            progress = agg.get("progress", "UNCHECKED")
+            item["切换进度"] = PROGRESS_LABEL.get(progress, progress)
+            item["mapping_id"] = agg.get("mapping_id")
+            item["evidence_pack_id"] = agg.get("pack_id")
+            annotated.append(item)
+        return annotated, total
+
+    PRECHECK_ACTIONS = {
+        "预查公式", "公式预查", "预检查", "兼容预查", "预查",
+        "生成检查单", "切换检查单", "检查公式兼容性", "预检查公式",
+        "公式迁移", "迁移公式", "迁移到v2", "迁移到V2", "结构化迁移",
+        "兼容性检查",
+    }
+    CONFIRM_ACTIONS = {
+        "确认切换", "确认迁移", "确认并上线", "确认上线", "确认切换并上线", "上线",
+        "上线v2", "上线V2", "上线结构化公式", "迁移上线", "切换上线",
+    }
+    MAPPING_ACTIONS = {"查看映射", "新旧映射", "版本映射", "映射核对"}
+    REFERENCE_ACTIONS = {"引用查证", "查看引用", "旧版引用", "查证引用"}
+
+    def handle_action(self, entry_id: int, action: str, remark: str | None = None) -> dict[str, Any]:
+        """统一动作入口：迁移动作走 hub，其余动作保留基类状态流转。"""
+        # 延迟导入避免模块初始化环。
+        from app.services.migration_hub import hub
+
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return {"ok": False, "message": f"{self.ENTITY} {entry_id} 不存在或已归档"}
+        code = str(entry.get("指标编码", ""))
+        hub.bootstrap()
+
+        if action in self.PRECHECK_ACTIONS:
+            result = hub.precheck(metric_code=code, catalog_id=entry_id)
+            result["entry"] = entry
+            result.setdefault("message", "预查完成")
+            return result
+        if action in self.CONFIRM_ACTIONS:
+            result = hub.confirm_switch(code, operator=(remark or "数据工程组"))
+            result["entry"] = entry
+            return result
+        if action in self.MAPPING_ACTIONS:
+            result = hub.mappings_view(code)
+            result["ok"] = True
+            result["entry"] = entry
+            result["message"] = f"指标 {code} 的新旧版本映射共 {result.get('total', 0)} 条"
+            return result
+        if action in self.REFERENCE_ACTIONS:
+            result = hub.references(code)
+            result["entry"] = entry
+            return result
+
+        # 关键词兜底：允许近义动作名仍命中同一用例。
+        if any(k in action for k in ("引用", "旧公式", "旧作业")):
+            result = hub.references(code)
+            result["entry"] = entry
+            return result
+        if "映射" in action:
+            result = hub.mappings_view(code)
+            result["ok"] = True
+            result["entry"] = entry
+            result["message"] = f"指标 {code} 的新旧版本映射共 {result.get('total', 0)} 条"
+            return result
+        if any(k in action for k in ("确认", "上线")) and "预查" not in action:
+            result = hub.confirm_switch(code, operator=(remark or "数据工程组"))
+            result["entry"] = entry
+            return result
+        if any(k in action for k in ("预查", "兼容", "检查单", "转换", "解析", "迁移", "结构化", "v2", "V2")):
+            result = hub.precheck(metric_code=code, catalog_id=entry_id)
+            result["entry"] = entry
+            result.setdefault("message", "预查完成")
+            return result
+
+        row, message = self.run_action(entry_id, action)
+        return {"ok": row is not None, "message": message, "entry": row}
+
     # ---- 业务扩展：口径治理与版本下发 ----
 
     def activate_metric(self, entry_id: int) -> dict[str, Any]:
